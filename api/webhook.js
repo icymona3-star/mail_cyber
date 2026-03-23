@@ -1,5 +1,5 @@
 import { AgentMailClient } from "agentmail";
-import Replicate from "replicate";
+import { Webhook } from "svix";
 
 // Vercel config: disable body parsing so we can verify the raw signature
 export const config = {
@@ -34,23 +34,25 @@ export default async function handler(req, res) {
   let event;
   try {
     const wh = new Webhook(process.env.AGENTMAIL_WEBHOOK_SECRET);
-   // event = wh.verify(rawBody, {
-   //   "svix-id": req.headers["svix-id"],
-   //   "svix-timestamp": req.headers["svix-timestamp"],
-   //   "svix-signature": req.headers["svix-signature"],
-   // });
+    event = wh.verify(rawBody, {
+      "svix-id": req.headers["svix-id"],
+      "svix-timestamp": req.headers["svix-timestamp"],
+      "svix-signature": req.headers["svix-signature"],
+    });
   } catch (err) {
-   // console.error("❌ Webhook signature verification failed:", err.message);
+    console.error("❌ Webhook signature verification failed:", err.message);
     return res.status(400).json({ error: "Invalid signature" });
   }
 
-  // 3. Return 200 immediately — AgentMail expects a fast acknowledgement
-  res.status(200).json({ received: true });
+  // 3. Process event (must await on Vercel to ensure completion)
+  try {
+    await processEvent(event);
+  } catch (err) {
+    console.error("Error processing event:", err);
+  }
 
-  // 4. Process asynchronously
-  processEvent(event).catch((err) =>
-    console.error("Error processing event:", err)
-  );
+  // 4. Return 200 to AgentMail
+  res.status(200).json({ received: true });
 }
 
 // ── Event Router ──────────────────────────────────────────────────────────────
@@ -102,11 +104,29 @@ async function processEvent(event) {
 // ── Event Handlers ────────────────────────────────────────────────────────────
 
 async function generateAIReply(emailText, subject) { 
-  const apiKey = "apf_he2i1t76k3shscaufb92wdrw"; //  YOUR_API_KEY
+  const apiKey = process.env.LLM_API_KEY;
+  if (!apiKey) {
+    console.error("❌ CRITICAL: LLM_API_KEY is missing from environment variables!");
+    return "I cannot reply right now because my brain (API Key) is missing.";
+  }
+
   const endpoint = "https://apifreellm.com/api/v1/chat";
 
+  // ── TRAIN YOUR AI HERE ────────────────────────────────────────────────────────
+  // Edit this text to change how your AI behaves!
+  const SYSTEM_INSTRUCTIONS = `
+  You are a professional customer support agent for my company.
+  Your goal is to be helpful, polite, and concise.
+  
+  - If the user asks about pricing, say: "Our pricing depends on the project scope."
+  - If the user wants to book a call, ask them to propose 3 available times.
+  - If the email is spam or nonsense, reply politely that you cannot help.
+  - Keep your reply under 100 words.
+  `;
+  // ──────────────────────────────────────────────────────────────────────────────
+
   const requestBody = {
-    message: `Email Subject: ${subject}\nEmail Content: ${emailText}\n\nWrite a concise and helpful reply.`,
+    message: `${SYSTEM_INSTRUCTIONS}\n\nIncoming Email:\nSubject: ${subject}\nBody: ${emailText}\n\nTask: Write a reply following the instructions above.`,
   };
 
   try {
@@ -144,6 +164,13 @@ async function onMessageReceived(event, client) {
   console.log(`   Body    : ${emailBody.slice(0, 200)}`);
 
   try {
+    // Prevent AI from replying to itself
+    const senders = Array.isArray(message.from) ? message.from : [message.from];
+    if (senders.some(f => f.address && f.address.includes("agentmail.to"))) {
+      console.log("🛑 Skipping auto-reply to avoid loop");
+      return;
+    }
+
     console.log("🤖 Generating AI reply...");
     const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)");
     console.log(`   AI Reply: ${replyText.slice(0, 200)}`);

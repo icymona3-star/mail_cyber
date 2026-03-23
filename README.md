@@ -56,6 +56,7 @@ Go to: **Vercel Dashboard → Project → Settings → Environment Variables**
 |---|---|
 | `AGENTMAIL_API_KEY` | Your AgentMail API key |
 | `AGENTMAIL_WEBHOOK_SECRET` | Secret printed by `setup.js` |
+| `LLM_API_KEY` | Your AI API Key |
 
 ### 6. Redeploy
 ```bash
