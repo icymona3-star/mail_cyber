@@ -1,5 +1,5 @@
 import { AgentMailClient } from "agentmail";
-import { Webhook } from "svix";
+import Replicate from "replicate";
 
 // Vercel config: disable body parsing so we can verify the raw signature
 export const config = {
@@ -34,13 +34,13 @@ export default async function handler(req, res) {
   let event;
   try {
     const wh = new Webhook(process.env.AGENTMAIL_WEBHOOK_SECRET);
-    event = wh.verify(rawBody, {
-      "svix-id": req.headers["svix-id"],
-      "svix-timestamp": req.headers["svix-timestamp"],
-      "svix-signature": req.headers["svix-signature"],
-    });
+   // event = wh.verify(rawBody, {
+   //   "svix-id": req.headers["svix-id"],
+   //   "svix-timestamp": req.headers["svix-timestamp"],
+   //   "svix-signature": req.headers["svix-signature"],
+   // });
   } catch (err) {
-    console.error("❌ Webhook signature verification failed:", err.message);
+   // console.error("❌ Webhook signature verification failed:", err.message);
     return res.status(400).json({ error: "Invalid signature" });
   }
 
@@ -101,32 +101,62 @@ async function processEvent(event) {
 
 // ── Event Handlers ────────────────────────────────────────────────────────────
 
+async function generateAIReply(emailText, subject) { 
+  const apiKey = "apf_he2i1t76k3shscaufb92wdrw"; //  YOUR_API_KEY
+  const endpoint = "https://apifreellm.com/api/v1/chat";
+
+  const requestBody = {
+    message: `Email Subject: ${subject}\nEmail Content: ${emailText}\n\nWrite a concise and helpful reply.`,
+  };
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      return data.response;
+    } else {
+      console.error("API error:", data);
+      return "Sorry, I couldn't generate a reply at this time.";
+    }
+  } catch (error) {
+    console.error("Error calling API:", error);
+    return "Sorry, I encountered an error generating a reply.";
+  }
+}
+
 async function onMessageReceived(event, client) {
-  // message.received is the ONLY event that includes both message + thread data
   const { message, thread } = event;
 
   console.log("📩 New email received!");
   console.log(`   From    : ${JSON.stringify(message.from)}`);
   console.log(`   To      : ${JSON.stringify(message.to)}`);
   console.log(`   Subject : ${message.subject}`);
-  // text/preview may be absent if the email is HTML-only
-  console.log(`   Preview : ${message.preview ?? message.text?.slice(0, 200) ?? "(HTML only)"}`);
-  console.log(`   Thread  : ${thread.thread_id} (${thread.message_count} messages)`);
 
-  // ── AUTO-REPLY (uncomment to enable) ──────────────────────────────────────
-  //
-  // try {
-  //   await client.inboxes.threads.messages.reply(
-  //     message.inbox_id,
-  //     thread.thread_id,
-  //     {
-  //       text: `Hi,\n\nThanks for your email! We received your message and will get back to you shortly.\n\nBest,\nYour AI Agent`,
-  //     }
-  //   );
-  //   console.log("✅ Auto-reply sent");
-  // } catch (err) {
-  //   console.error("Failed to send auto-reply:", err);
-  // }
+  const emailBody = message.extractedText ?? message.text ?? message.preview ?? "(no body)";
+  console.log(`   Body    : ${emailBody.slice(0, 200)}`);
+
+  try {
+    console.log("🤖 Generating AI reply...");
+    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)");
+    console.log(`   AI Reply: ${replyText.slice(0, 200)}`);
+
+    await client.inboxes.threads.messages.reply(
+      message.inboxId ?? message.inbox_id,
+      thread.threadId ?? thread.thread_id,
+      { text: replyText }
+    );
+    console.log("✅ AI auto-reply sent!");
+  } catch (err) {
+    console.error("❌ Failed to send AI reply:", err.message);
+  }
 }
 
 async function onMessageSent(event) {
@@ -161,4 +191,5 @@ async function onDomainVerified(event) {
   const { domain } = event;
   console.log(`🌐 Domain verified: ${domain.domain}`);
   // TODO: enable domain-based features in your app
+
 }
