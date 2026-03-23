@@ -1,0 +1,11 @@
+node_modules/
+
+# Never commit real secrets
+.env
+.env.local
+.env.*.local
+
+# Vercel
+.vercel
+.vercel
+.env*.local

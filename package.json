@@ -1,0 +1,14 @@
+{
+  "name": "agentmail-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "setup": "node setup.js"
+  },
+  "dependencies": {
+    "agentmail": "latest",
+    "svix": "^1.15.0"
+  }
+}
