@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
+    "start": "node server.js",
     "setup": "node setup.js"
   },
   "dependencies": {
