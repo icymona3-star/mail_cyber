@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
     "start": "node server.js",
-    "setup": "node setup.js"
+    "test": "node test-local.js",
+    "test:ai": "node test-ai.js",
+    "setup": "node setup.js",
+    "dev": "node server.js"
   },
   "dependencies": {
     "agentmail": "latest",
