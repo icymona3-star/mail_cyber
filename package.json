@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "agentmail": "latest",
-    "svix": "^1.15.0"
+    "svix": "^1.15.0",
+    "vercel": "^50.42.0"
   }
 }

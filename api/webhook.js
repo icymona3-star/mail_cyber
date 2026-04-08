@@ -20,9 +20,13 @@ async function getRawBody(req) {
 // Idempotency: track processed event IDs to avoid double-processing on retries
 const processedEvents = new Set();
 
+// AI Response Cache — keyed by message ID, stores the generated reply
+const aiReplyCache = new Map();
+
 // ── Main Handler ──────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
+  console.log(`⚡ Incoming Webhook! Method: ${req.method}`);
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
@@ -103,52 +107,250 @@ async function processEvent(event) {
 
 // ── Event Handlers ────────────────────────────────────────────────────────────
 
-async function generateAIReply(emailText, subject) { 
-  const apiKey = process.env.LLM_API_KEY;
-  if (!apiKey) {
-    console.error("❌ CRITICAL: LLM_API_KEY is missing from environment variables!");
-    return "I cannot reply right now because my brain (API Key) is missing.";
+// ──────────────────────────────────────────────────────────────────────────────
+// GUARDRAIL SYSTEM
+// LAYER 1 — Locked facts. These values are hardcoded. The AI never touches them.
+// LAYER 2 — AI thinks freely and writes naturally for general questions.
+// LAYER 3 — Post-processor. Sanitises the AI output before sending.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ── LAYER 1: LOCKED FACTS — hardcoded, AI cannot change these ──
+const COMPANY = {
+  name: "TGNE Solutions",
+  rep: "Mr. David Oppan",
+  role: "Sales Representative",
+  phone: "+233 55 812 2767",
+  email: "info@tgnesolutions.com",
+  website: "www.tgnesolutions.com",
+  location: "Tema, Community 11, Ghana",
+  hours: "Monday to Friday 8AM-6PM, Saturday 9AM-2PM",
+  projects: "200+",
+  satisfaction: "98%",
+  aiBuilder: "Cyber",
+  aiBuilderContact: "0541988383",
+  services: [
+    "Custom Software Development (web apps, mobile apps, APIs, enterprise systems)",
+    "AI-Powered Tools and Automation",
+    "Website Creation and Development (WordPress, React, E-Commerce)",
+    "Graphic Design and Branding",
+    "Digital Education and ICT Training",
+    "Production and Manufacturing (printing, laser engraving, CNC)"
+  ]
+};
+
+const SIGNATURE = [
+  "Warm regards,",
+  COMPANY.rep,
+  `${COMPANY.role} | ${COMPANY.name}`,
+  `Tel: ${COMPANY.phone} | Email: ${COMPANY.email}`,
+  COMPANY.website
+].join("\n");
+
+function buildEmail(senderName, bodyText) {
+  return `Dear ${senderName},\n\n${bodyText.trim()}\n\n${SIGNATURE}`;
+}
+
+// ── LAYER 1: KEYWORD ROUTER — intercepts known topics before AI is called ──
+// For these topics the reply is 100% code-controlled. Zero hallucination possible.
+function getLockedReply(emailText, subject, senderName) {
+  const text = ((emailText || "") + " " + (subject || "")).toLowerCase();
+
+  // PRICING
+  if (/\b(pric|cost|quot|fee|charg|rate|budget|how much|payment|invoice)/.test(text)) {
+    return buildEmail(senderName,
+      `Thank you for reaching out to ${COMPANY.name}.\n\n` +
+      `Every project we undertake is unique, and we tailor our pricing to match your specific requirements. ` +
+      `Our team will carefully assess your needs and provide you with a detailed, transparent quote.\n\n` +
+      `To get started, kindly share a brief overview of your project and we will get back to you promptly.`
+    );
   }
 
-  const endpoint = "https://apifreellm.com/api/v1/chat";
+  // SERVICES
+  if (/\b(service|what do you (do|offer)|what can you|how can you help|capabilit|solution)/.test(text)) {
+    const serviceList = COMPANY.services.map(s => `- ${s}`).join("\n");
+    return buildEmail(senderName,
+      `Thank you for your interest in ${COMPANY.name}.\n\n` +
+      `We offer a comprehensive suite of technology and digital solutions:\n\n${serviceList}\n\n` +
+      `We would love to explore how we can tailor any of these to your specific needs. ` +
+      `Kindly share a brief overview of your project to get started.`
+    );
+  }
 
-  // ── TRAIN YOUR AI HERE ────────────────────────────────────────────────────────
-  // Edit this text to change how your AI behaves!
-  const SYSTEM_INSTRUCTIONS = `
-  You are a professional customer support agent for my company.
-  Your goal is to be helpful, polite, and concise.
+  // DEMO / CALL / MEETING
+  if (/\b(demo|schedul|appointm|book|meeting|call|availab|time slot|connect|talk|discuss)/.test(text)) {
+    return buildEmail(senderName,
+      `Thank you for your interest in ${COMPANY.name}.\n\n` +
+      `We would love to connect with you and explore how we can support your goals.\n\n` +
+      `Kindly share 2 to 3 convenient time slots that work for you, and our team will confirm a session promptly.`
+    );
+  }
+
+  // WHO BUILT YOU / ARE YOU AN AI
+  if (/\b(who built|who made|who creat|who develop|are you ai|are you a bot|are you human|what are you)/.test(text)) {
+    return buildEmail(senderName,
+      `Great question!\n\n` +
+      `I am an AI-powered assistant representing ${COMPANY.name}. ` +
+      `I was developed by ${COMPANY.aiBuilder}, our in-house AI engineer. ` +
+      `You can reach him directly on ${COMPANY.aiBuilderContact}.\n\n` +
+      `Feel free to ask me anything about our services or how we can support your business.`
+    );
+  }
+
+  // CONTACT / LOCATION / HOURS
+  if (/\b(contact|location|address|where are you|office|open|hours|visit|find you|reach you)/.test(text)) {
+    return buildEmail(senderName,
+      `Thank you for reaching out.\n\n` +
+      `You can reach ${COMPANY.name} through any of the following:\n\n` +
+      `Phone: ${COMPANY.phone}\nEmail: ${COMPANY.email}\nWebsite: ${COMPANY.website}\n` +
+      `Address: ${COMPANY.location}\nOffice Hours: ${COMPANY.hours}\n\n` +
+      `We look forward to hearing from you.`
+    );
+  }
+
+  // WHO ARE YOU / INTRODUCE YOURSELF
+  if (/\b(who are you|your name|introduce yourself|tell me about you|about tgne|about your company)/.test(text)) {
+    return buildEmail(senderName,
+      `Thank you for your interest.\n\n` +
+      `My name is ${COMPANY.rep}, ${COMPANY.role} at ${COMPANY.name} — ` +
+      `a premium technology and digital innovation company based in ${COMPANY.location}, ` +
+      `serving businesses across Africa and beyond.\n\n` +
+      `With over ${COMPANY.projects} projects delivered and a ${COMPANY.satisfaction} client satisfaction rate, ` +
+      `we are proud to be a trusted partner for businesses that want to grow through technology. ` +
+      `How can we help you today?`
+    );
+  }
+
+  // No locked topic matched — return null so AI handles it
+  return null;
+}
+
+// ── LAYER 3: POST-PROCESSOR — sanitises AI output before sending ──
+function sanitiseReply(reply, senderName) {
+  return reply
+    // Fix any wrong name the AI used
+    .replace(/Mr\.?\s*Augustine/gi, COMPANY.rep)
+    .replace(/David\s+Oppan/gi, "David Oppan") // normalise spacing
+    // Fix placeholders
+    .replace(/\[Your\s*Name\]/gi, COMPANY.rep)
+    .replace(/\[Your\s*Company\]/gi, COMPANY.name)
+    .replace(/\[Client\s*Name\]/gi, senderName)
+    .replace(/\[Recipient\]/gi, senderName)
+    .replace(/\[SenderFirstName\]/gi, senderName)
+    .replace(/\[Contact\s*Number\]/gi, COMPANY.phone)
+    .replace(/\[Project\s*Name\]/gi, "your project")
+    .replace(/\[Areas\s*of\s*Expertise\]/gi, "software development, AI automation, and web development")
+    .replace(/\[.*?\]/g, "") // nuke any remaining [anything]
+    // Fix wrong phone/email/website if AI invented them
+    .replace(/\+?\d{3}[-\s]?\d{3}[-\s]?\d{4,}/g, COMPANY.phone)
+    // Remove AI-generated signature — we attach our own
+    .replace(/warm\s*regards[\s\S]*/gi, "")
+    .trim();
+}
+
+export async function generateAIReply(emailText, subject, senderName, threadId = null, client = null) {
+
+  // ── Check message history for context ─────────────────────────────────────
+  let threadMessages = [];
+  let hasHangingMessages = false;
   
-  - If the user asks about pricing, say: "Our pricing depends on the project scope."
-  - If the user wants to book a call, ask them to propose 3 available times.
-  - If the email is spam or nonsense, reply politely that you cannot help.
-  - Keep your reply under 100 words.
-  `;
-  // ──────────────────────────────────────────────────────────────────────────────
+  if (threadId && client) {
+    try {
+      const thread = await client.threads.get(threadId);
+      const messages = thread?.messages ?? thread?.data ?? [];
+      if (messages.length > 1) {
+        threadMessages = messages.slice(0, -1); // All except current
+        hasHangingMessages = true;
+        console.log(`📜 Found ${threadMessages.length} previous messages in thread`);
+      }
+    } catch (e) {
+      console.log("⚠️ Could not fetch thread history:", e.message);
+    }
+  }
 
-  const requestBody = {
-    message: `${SYSTEM_INSTRUCTIONS}\n\nIncoming Email:\nSubject: ${subject}\nBody: ${emailText}\n\nTask: Write a reply following the instructions above.`,
-  };
+  // ── LAYER 1: Check if topic is locked — return controlled reply immediately ──
+  const lockedReply = getLockedReply(emailText, subject, senderName);
+  if (lockedReply) {
+    console.log("🔒 Locked reply used — AI not consulted");
+    return lockedReply;
+  }
+
+  // ── LAYER 2: AI handles general/unknown questions — thinks freely ──
+  console.log("🤖 General question — AI thinking freely");
+
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    console.error("❌ GROQ_API_KEY is missing!");
+    return buildEmail(senderName,
+      `Thank you for reaching out to ${COMPANY.name}.\n\n` +
+      `We have received your message and a member of our team will get back to you shortly.\n\n` +
+      `In the meantime, feel free to reach us at ${COMPANY.phone} or ${COMPANY.email}.`
+    );
+  }
+
+  const SYSTEM_PROMPT = `You are ${COMPANY.rep}, a confident and warm Sales Representative for ${COMPANY.name} — a premium technology company in Ghana.
+
+You are writing a professional email reply. You may think freely and respond naturally to whatever the client is asking. Be helpful, insightful, and human — not robotic.
+
+${hasHangingMessages ? `IMPORTANT: This is a follow-up message. Previous messages in this thread:\n${threadMessages.map(m => `- ${m.from?.name ?? 'User'}: ${m.preview ?? m.text ?? ''}`).join('\n')}\n\nTake this context into account when writing your reply.\n` : ''}
+
+Locked facts you MUST use exactly as written (never invent alternatives):
+- Company: ${COMPANY.name}
+- Your name: ${COMPANY.rep}
+- Your role: ${COMPANY.role}
+- Phone: ${COMPANY.phone}
+- Email: ${COMPANY.email}
+- Website: ${COMPANY.website}
+- Location: ${COMPANY.location}
+- Services: ${COMPANY.services.join(", ")}
+
+Formatting rules:
+1. Start with: Dear ${senderName},
+2. Leave a blank line between each paragraph.
+3. Keep reply between 80 and 160 words.
+4. Perfect spelling and grammar always.
+5. Do NOT include a signature — it will be added automatically.
+6. Do NOT use placeholder text like [Your Name] or [Company]. Use real values only.
+7. Do NOT include a subject line.`;
 
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        "Authorization": `Bearer ${apiKey}`
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: `Sender: ${senderName}\nSubject: ${subject}\nEmail: ${emailText}\n\nWrite the reply now.` }
+        ],
+        temperature: 0.5,  // higher than locked responses — allows natural thinking
+        max_tokens: 400
+      })
     });
 
-    const data = await response.json();
-    if (data.success) {
-      return data.response;
-    } else {
-      console.error("API error:", data);
-      return "Sorry, I couldn't generate a reply at this time.";
+    if (!response.ok) {
+      const text = await response.text();
+      return `[Debug Error] Groq API status ${response.status}: ${text.slice(0, 200)}`;
     }
+
+    const data = await response.json();
+    let reply = data.choices?.[0]?.message?.content?.trim();
+
+    if (!reply) {
+      return buildEmail(senderName, `Thank you for your message. A member of our team will be in touch with you shortly.\n\nFeel free to reach us at ${COMPANY.phone} or ${COMPANY.email}.`);
+    }
+
+    // ── LAYER 3: Sanitise AI output ──
+    reply = sanitiseReply(reply, senderName);
+
+    // Attach locked signature
+    return reply + "\n\n" + SIGNATURE;
+
   } catch (error) {
-    console.error("Error calling API:", error);
-    return "Sorry, I encountered an error generating a reply.";
+    console.error("Groq error:", error);
+    return buildEmail(senderName, `Thank you for your message. A member of our team will be in touch with you shortly.\n\nFeel free to reach us directly at ${COMPANY.phone} or ${COMPANY.email}.`);
   }
 }
 
@@ -156,30 +358,55 @@ async function onMessageReceived(event, client) {
   const { message, thread } = event;
 
   console.log("📩 New email received!");
-  console.log(`   From    : ${JSON.stringify(message.from)}`);
   console.log(`   To      : ${JSON.stringify(message.to)}`);
   console.log(`   Subject : ${message.subject}`);
+
+  // Extract sender to verify if the "dot" is present
+  const senders = Array.isArray(message.from) ? message.from : [message.from];
+  const senderAddress = senders[0]?.address;
+  console.log(`   Sender  : ${senderAddress}`);
 
   const emailBody = message.extractedText ?? message.text ?? message.preview ?? "(no body)";
   console.log(`   Body    : ${emailBody.slice(0, 200)}`);
 
   try {
     // Prevent AI from replying to itself
-    const senders = Array.isArray(message.from) ? message.from : [message.from];
     if (senders.some(f => f.address && f.address.includes("agentmail.to"))) {
       console.log("🛑 Skipping auto-reply to avoid loop");
       return;
     }
 
+    // Extract sender's first name for personalised greeting
+    const senderFullName = senders[0]?.name || senderAddress?.split("@")[0] || "";
+    const senderFirstName = senderFullName.split(" ")[0] || "Valued Client";
+
     console.log("🤖 Generating AI reply...");
-    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)");
+    
+    // Check cache first - if message was already replied to, use cached reply
+    const cacheKey = messageId;
+    if (aiReplyCache.has(cacheKey)) {
+      console.log("📦 Using cached AI reply");
+      const replyText = aiReplyCache.get(cacheKey);
+      console.log(`   Cached Reply: ${replyText.slice(0,200)}`);
+      
+      const inboxId = message.inboxId ?? message.inbox_id;
+      const msgId = message.messageId ?? message.message_id;
+      await client.inboxes.messages.reply(inboxId, msgId, { text: replyText });
+      console.log("✅ Cached AI reply sent!");
+      return;
+    }
+    
+    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)", senderFirstName, thread?.threadId ?? thread?.thread_id, client);
     console.log(`   AI Reply: ${replyText.slice(0, 200)}`);
 
-    await client.inboxes.threads.messages.reply(
-      message.inboxId ?? message.inbox_id,
-      thread.threadId ?? thread.thread_id,
-      { text: replyText }
-    );
+    // Cache the reply for future retries
+    aiReplyCache.set(cacheKey, replyText);
+
+    const inboxId = message.inboxId ?? message.inbox_id;
+    const messageId = message.messageId ?? message.message_id;
+
+    // ✅ Correct SDK method: client.inboxes.messages.reply(inbox_id, message_id, { text })
+    await client.inboxes.messages.reply(inboxId, messageId, { text: replyText });
     console.log("✅ AI auto-reply sent!");
   } catch (err) {
     console.error("❌ Failed to send AI reply:", err.message);
