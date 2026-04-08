@@ -1,12 +1,9 @@
 import { AgentMailClient } from "agentmail";
 import { Webhook } from "svix";
 
-// Vercel config: disable body parsing so we can verify the raw signature
 export const config = {
   api: { bodyParser: false },
 };
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -17,13 +14,8 @@ async function getRawBody(req) {
   });
 }
 
-// Idempotency: track processed event IDs to avoid double-processing on retries
 const processedEvents = new Set();
-
-// AI Response Cache — keyed by message ID, stores the generated reply
 const aiReplyCache = new Map();
-
-// ── Main Handler ──────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
   console.log(`⚡ Incoming Webhook! Method: ${req.method}`);
@@ -31,10 +23,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  // 1. Read raw body (required for Svix signature verification)
   const rawBody = await getRawBody(req);
 
-  // 2. Verify the webhook signature using Svix
   let event;
   try {
     const wh = new Webhook(process.env.AGENTMAIL_WEBHOOK_SECRET);
@@ -48,23 +38,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Invalid signature" });
   }
 
-  // 3. Process event (must await on Vercel to ensure completion)
   try {
     await processEvent(event);
   } catch (err) {
     console.error("Error processing event:", err);
   }
 
-  // 4. Return 200 to AgentMail
   res.status(200).json({ received: true });
 }
-
-// ── Event Router ──────────────────────────────────────────────────────────────
 
 async function processEvent(event) {
   const { event_id, event_type } = event;
 
-  // Idempotency guard — safe against AgentMail retries
   if (processedEvents.has(event_id)) {
     console.log(`⚠️  Duplicate event ignored: ${event_id}`);
     return;
@@ -73,7 +58,6 @@ async function processEvent(event) {
 
   console.log(`📨 Event received: ${event_type} [${event_id}]`);
 
-  // Initialise the official AgentMail SDK client
   const client = new AgentMailClient({
     apiKey: process.env.AGENTMAIL_API_KEY,
   });
@@ -105,16 +89,6 @@ async function processEvent(event) {
   }
 }
 
-// ── Event Handlers ────────────────────────────────────────────────────────────
-
-// ──────────────────────────────────────────────────────────────────────────────
-// GUARDRAIL SYSTEM
-// LAYER 1 — Locked facts. These values are hardcoded. The AI never touches them.
-// LAYER 2 — AI thinks freely and writes naturally for general questions.
-// LAYER 3 — Post-processor. Sanitises the AI output before sending.
-// ──────────────────────────────────────────────────────────────────────────────
-
-// ── LAYER 1: LOCKED FACTS — hardcoded, AI cannot change these ──
 const COMPANY = {
   name: "TGNE Solutions",
   rep: "Mr. David Oppan",
@@ -150,12 +124,9 @@ function buildEmail(senderName, bodyText) {
   return `Dear ${senderName},\n\n${bodyText.trim()}\n\n${SIGNATURE}`;
 }
 
-// ── LAYER 1: KEYWORD ROUTER — intercepts known topics before AI is called ──
-// For these topics the reply is 100% code-controlled. Zero hallucination possible.
 function getLockedReply(emailText, subject, senderName) {
   const text = ((emailText || "") + " " + (subject || "")).toLowerCase();
 
-  // PRICING
   if (/\b(pric|cost|quot|fee|charg|rate|budget|how much|payment|invoice)/.test(text)) {
     return buildEmail(senderName,
       `Thank you for reaching out to ${COMPANY.name}.\n\n` +
@@ -165,7 +136,6 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // SERVICES
   if (/\b(service|what do you (do|offer)|what can you|how can you help|capabilit|solution)/.test(text)) {
     const serviceList = COMPANY.services.map(s => `- ${s}`).join("\n");
     return buildEmail(senderName,
@@ -176,7 +146,6 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // DEMO / CALL / MEETING
   if (/\b(demo|schedul|appointm|book|meeting|call|availab|time slot|connect|talk|discuss)/.test(text)) {
     return buildEmail(senderName,
       `Thank you for your interest in ${COMPANY.name}.\n\n` +
@@ -185,7 +154,6 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // WHO BUILT YOU / ARE YOU AN AI
   if (/\b(who built|who made|who creat|who develop|are you ai|are you a bot|are you human|what are you)/.test(text)) {
     return buildEmail(senderName,
       `Great question!\n\n` +
@@ -196,7 +164,6 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // CONTACT / LOCATION / HOURS
   if (/\b(contact|location|address|where are you|office|open|hours|visit|find you|reach you)/.test(text)) {
     return buildEmail(senderName,
       `Thank you for reaching out.\n\n` +
@@ -207,7 +174,6 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // WHO ARE YOU / INTRODUCE YOURSELF
   if (/\b(who are you|your name|introduce yourself|tell me about you|about tgne|about your company)/.test(text)) {
     return buildEmail(senderName,
       `Thank you for your interest.\n\n` +
@@ -220,17 +186,13 @@ function getLockedReply(emailText, subject, senderName) {
     );
   }
 
-  // No locked topic matched — return null so AI handles it
   return null;
 }
 
-// ── LAYER 3: POST-PROCESSOR — sanitises AI output before sending ──
 function sanitiseReply(reply, senderName) {
   return reply
-    // Fix any wrong name the AI used
     .replace(/Mr\.?\s*Augustine/gi, COMPANY.rep)
-    .replace(/David\s+Oppan/gi, "David Oppan") // normalise spacing
-    // Fix placeholders
+    .replace(/David\s+Oppan/gi, "David Oppan")
     .replace(/\[Your\s*Name\]/gi, COMPANY.rep)
     .replace(/\[Your\s*Company\]/gi, COMPANY.name)
     .replace(/\[Client\s*Name\]/gi, senderName)
@@ -239,26 +201,22 @@ function sanitiseReply(reply, senderName) {
     .replace(/\[Contact\s*Number\]/gi, COMPANY.phone)
     .replace(/\[Project\s*Name\]/gi, "your project")
     .replace(/\[Areas\s*of\s*Expertise\]/gi, "software development, AI automation, and web development")
-    .replace(/\[.*?\]/g, "") // nuke any remaining [anything]
-    // Fix wrong phone/email/website if AI invented them
+    .replace(/\[.*?\]/g, "")
     .replace(/\+?\d{3}[-\s]?\d{3}[-\s]?\d{4,}/g, COMPANY.phone)
-    // Remove AI-generated signature — we attach our own
     .replace(/warm\s*regards[\s\S]*/gi, "")
     .trim();
 }
 
 export async function generateAIReply(emailText, subject, senderName, threadId = null, client = null) {
-
-  // ── Check message history for context ─────────────────────────────────────
   let threadMessages = [];
   let hasHangingMessages = false;
-  
+
   if (threadId && client) {
     try {
       const thread = await client.threads.get(threadId);
       const messages = thread?.messages ?? thread?.data ?? [];
       if (messages.length > 1) {
-        threadMessages = messages.slice(0, -1); // All except current
+        threadMessages = messages.slice(0, -1);
         hasHangingMessages = true;
         console.log(`📜 Found ${threadMessages.length} previous messages in thread`);
       }
@@ -267,14 +225,12 @@ export async function generateAIReply(emailText, subject, senderName, threadId =
     }
   }
 
-  // ── LAYER 1: Check if topic is locked — return controlled reply immediately ──
   const lockedReply = getLockedReply(emailText, subject, senderName);
   if (lockedReply) {
     console.log("🔒 Locked reply used — AI not consulted");
     return lockedReply;
   }
 
-  // ── LAYER 2: AI handles general/unknown questions — thinks freely ──
   console.log("🤖 General question — AI thinking freely");
 
   const apiKey = process.env.GROQ_API_KEY;
@@ -325,7 +281,7 @@ Formatting rules:
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: `Sender: ${senderName}\nSubject: ${subject}\nEmail: ${emailText}\n\nWrite the reply now.` }
         ],
-        temperature: 0.5,  // higher than locked responses — allows natural thinking
+        temperature: 0.5,
         max_tokens: 400
       })
     });
@@ -342,10 +298,7 @@ Formatting rules:
       return buildEmail(senderName, `Thank you for your message. A member of our team will be in touch with you shortly.\n\nFeel free to reach us at ${COMPANY.phone} or ${COMPANY.email}.`);
     }
 
-    // ── LAYER 3: Sanitise AI output ──
     reply = sanitiseReply(reply, senderName);
-
-    // Attach locked signature
     return reply + "\n\n" + SIGNATURE;
 
   } catch (error) {
@@ -361,7 +314,6 @@ async function onMessageReceived(event, client) {
   console.log(`   To      : ${JSON.stringify(message.to)}`);
   console.log(`   Subject : ${message.subject}`);
 
-  // Extract sender to verify if the "dot" is present
   const senders = Array.isArray(message.from) ? message.from : [message.from];
   const senderAddress = senders[0]?.address;
   console.log(`   Sender  : ${senderAddress}`);
@@ -370,80 +322,84 @@ async function onMessageReceived(event, client) {
   console.log(`   Body    : ${emailBody.slice(0, 200)}`);
 
   try {
-    // Prevent AI from replying to itself
     if (senders.some(f => f.address && f.address.includes("agentmail.to"))) {
       console.log("🛑 Skipping auto-reply to avoid loop");
       return;
     }
 
-    // Extract sender's first name for personalised greeting
     const senderFullName = senders[0]?.name || senderAddress?.split("@")[0] || "";
     const senderFirstName = senderFullName.split(" ")[0] || "Valued Client";
 
-    console.log("🤖 Generating AI reply...");
-    
-    // Check cache first - if message was already replied to, use cached reply
+    // ✅ Extract IDs FIRST before any use
+    const inboxId = message.inboxId ?? message.inbox_id;
+    const messageId = message.messageId ?? message.message_id;
+    const threadId = thread?.threadId ?? thread?.thread_id;
+
+    console.log(`   InboxID: ${inboxId}, MessageID: ${messageId}, ThreadID: ${threadId}`);
+
+    if (!inboxId) {
+      console.error("❌ Cannot reply — inboxId is missing from webhook payload");
+      return;
+    }
+    if (!messageId) {
+      console.error("❌ Cannot reply — messageId is missing from webhook payload");
+      return;
+    }
+
+    // Check cache to avoid duplicate replies on retries
     const cacheKey = messageId;
     if (aiReplyCache.has(cacheKey)) {
       console.log("📦 Using cached AI reply");
       const replyText = aiReplyCache.get(cacheKey);
-      console.log(`   Cached Reply: ${replyText.slice(0,200)}`);
-      
-      const inboxId = message.inboxId ?? message.inbox_id;
-      const msgId = message.messageId ?? message.message_id;
-      await client.inboxes.messages.reply(inboxId, msgId, { text: replyText });
+      console.log(`   Cached Reply: ${replyText.slice(0, 200)}`);
+      // ✅ Correct SDK call
+      await client.inboxes.messages.reply(inboxId, messageId, { text: replyText });
       console.log("✅ Cached AI reply sent!");
       return;
     }
-    
-    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)", senderFirstName, thread?.threadId ?? thread?.thread_id, client);
+
+    console.log("🤖 Generating AI reply...");
+    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)", senderFirstName, threadId, client);
     console.log(`   AI Reply: ${replyText.slice(0, 200)}`);
 
-    // Cache the reply for future retries
     aiReplyCache.set(cacheKey, replyText);
 
-    const inboxId = message.inboxId ?? message.inbox_id;
-    const messageId = message.messageId ?? message.message_id;
-
-    // ✅ Correct SDK method: client.inboxes.messages.reply(inbox_id, message_id, { text })
+    // ✅ The only correct SDK method
     await client.inboxes.messages.reply(inboxId, messageId, { text: replyText });
     console.log("✅ AI auto-reply sent!");
+
   } catch (err) {
     console.error("❌ Failed to send AI reply:", err.message);
+    if (err.body) console.error("   API response:", JSON.stringify(err.body));
   }
 }
 
 async function onMessageSent(event) {
   const { send } = event;
-  console.log(`✅ Message sent — ID: ${send.message_id}`);
+  console.log(`✅ Message sent — ID: ${send?.message_id}`);
 }
 
 async function onMessageDelivered(event) {
   const { delivery } = event;
-  console.log(`📬 Message delivered — ID: ${delivery.message_id}`);
+  console.log(`📬 Message delivered — ID: ${delivery?.message_id}`);
 }
 
 async function onMessageBounced(event) {
   const { bounce } = event;
-  console.error(`⚠️  Message bounced — ID: ${bounce.message_id}, Type: ${bounce.bounce_type}`);
-  // TODO: flag this address in your CRM / database
+  console.error(`⚠️  Message bounced — ID: ${bounce?.message_id}, Type: ${bounce?.bounce_type}`);
 }
 
 async function onMessageComplained(event) {
   const { complaint } = event;
-  console.warn(`🚨 Spam complaint — ID: ${complaint.message_id}`);
-  // TODO: unsubscribe user from future emails
+  console.warn(`🚨 Spam complaint — ID: ${complaint?.message_id}`);
 }
 
 async function onMessageRejected(event) {
   const { reject } = event;
-  console.error(`🚫 Message rejected — ID: ${reject.message_id}`);
-  // TODO: log rejection reason and alert your team
+  console.error(`🚫 Message rejected — ID: ${reject?.message_id}`);
 }
 
 async function onDomainVerified(event) {
   const { domain } = event;
-  console.log(`🌐 Domain verified: ${domain.domain}`);
-  // TODO: enable domain-based features in your app
-
+  console.log(`🌐 Domain verified: ${domain?.domain}`);
 }

@@ -1,10 +1,23 @@
 import { AgentMailClient } from "agentmail";
 import { Webhook } from "svix";
 import http from "http";
+import fs from "fs";
+import path from "path";
 
-const config = {
-  api: { bodyParser: false },
-};
+// Load .env.local
+const envPath = path.resolve(process.cwd(), '.env.local');
+if (fs.existsSync(envPath)) {
+  const envConfig = fs.readFileSync(envPath, 'utf8');
+  envConfig.split('\n').forEach(line => {
+    const match = line.match(/^([^=]+)=(.*)$/);
+    if (match) {
+      const key = match[1].trim();
+      const value = match[2].trim().replace(/^['"]|['"]$/g, '');
+      process.env[key] = value;
+    }
+  });
+  console.log("✅ Loaded .env.local");
+}
 
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -139,7 +152,7 @@ function sanitiseReply(reply, senderName) {
 export async function generateAIReply(emailText, subject, senderName, threadId = null, client = null) {
   let threadMessages = [];
   let hasHangingMessages = false;
-  
+
   if (threadId && client) {
     try {
       const thread = await client.threads.get(threadId);
@@ -236,7 +249,7 @@ Formatting rules:
   }
 }
 
-async function processEvent(event) {
+async function processEvent(event, isLocalTest = false) {
   const { event_id, event_type } = event;
 
   if (processedEvents.has(event_id)) {
@@ -253,7 +266,7 @@ async function processEvent(event) {
 
   switch (event_type) {
     case "message.received":
-      await onMessageReceived(event, client);
+      await onMessageReceived(event, client, isLocalTest);
       break;
     case "message.sent":
       await onMessageSent(event);
@@ -278,7 +291,7 @@ async function processEvent(event) {
   }
 }
 
-async function onMessageReceived(event, client) {
+async function onMessageReceived(event, client, isLocalTest = false) {
   const { message, thread } = event;
 
   console.log("📩 New email received!");
@@ -293,6 +306,7 @@ async function onMessageReceived(event, client) {
   console.log(`   Body    : ${emailBody.slice(0, 200)}`);
 
   try {
+    // Prevent replying to own inbox (loop guard)
     if (senders.some(f => f.address && f.address.includes("agentmail.to"))) {
       console.log("🛑 Skipping auto-reply to avoid loop");
       return;
@@ -301,75 +315,95 @@ async function onMessageReceived(event, client) {
     const senderFullName = senders[0]?.name || senderAddress?.split("@")[0] || "";
     const senderFirstName = senderFullName.split(" ")[0] || "Valued Client";
 
-    console.log("🤖 Generating AI reply...");
-    
+    // ✅ Extract IDs first — normalize inboxId to username only (strip @agentmail.to if present)
+    const rawInboxId = message.inboxId ?? message.inbox_id ?? "";
+    const inboxId = rawInboxId.includes("@") ? rawInboxId.split("@")[0] : rawInboxId;
     const messageId = message.messageId ?? message.message_id;
-    const cacheKey = messageId;
-    
-    if (aiReplyCache.has(cacheKey)) {
-      console.log("📦 Using cached AI reply");
-      const replyText = aiReplyCache.get(cacheKey);
-      console.log(`   Cached Reply: ${replyText.slice(0,200)}`);
-      
-      const inboxId = message.inboxId ?? message.inbox_id;
-      await client.inboxes.messages.reply(inboxId, messageId, { text: replyText });
-      console.log("✅ Cached AI reply sent!");
+    const threadId = thread?.threadId ?? thread?.thread_id;
+
+    console.log(`   InboxID: ${inboxId}, MessageID: ${messageId}, ThreadID: ${threadId}`);
+
+    if (!inboxId) {
+      console.error("❌ Cannot reply — inboxId is missing from webhook payload");
       return;
     }
-    
-    const replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)", senderFirstName, thread?.threadId ?? thread?.thread_id, client);
-    console.log(`   AI Reply: ${replyText.slice(0, 200)}`);
+    if (!messageId) {
+      console.error("❌ Cannot reply — messageId is missing from webhook payload");
+      return;
+    }
 
-    aiReplyCache.set(cacheKey, replyText);
+    // Generate the reply (always — even in local test mode, so you can see it)
+    const cacheKey = messageId;
+    let replyText;
 
-    const inboxId = message.inboxId ?? message.inbox_id;
+    if (aiReplyCache.has(cacheKey)) {
+      console.log("📦 Using cached AI reply");
+      replyText = aiReplyCache.get(cacheKey);
+    } else {
+      console.log("🤖 Generating AI reply...");
+      replyText = await generateAIReply(emailBody, message.subject ?? "(no subject)", senderFirstName, threadId, client);
+      aiReplyCache.set(cacheKey, replyText);
+    }
+
+    console.log(`   AI Reply:\n${replyText}\n`);
+
+    // ✅ LOCAL TEST MODE — skip the actual API send (IDs are fake, would 404)
+    if (isLocalTest) {
+      console.log("🧪 LOCAL TEST — reply generated successfully. Skipping actual send.");
+      console.log("   ✅ To send for real, deploy to Vercel and trigger via a real email.");
+      return;
+    }
+
+    // ✅ PRODUCTION — send via AgentMail SDK
     await client.inboxes.messages.reply(inboxId, messageId, { text: replyText });
     console.log("✅ AI auto-reply sent!");
+
   } catch (err) {
     console.error("❌ Failed to send AI reply:", err.message);
+    if (err.body) console.error("   API response:", JSON.stringify(err.body));
   }
 }
 
 async function onMessageSent(event) {
   const { send } = event;
-  console.log(`✅ Message sent — ID: ${send.message_id}`);
+  console.log(`✅ Message sent — ID: ${send?.message_id}`);
 }
 
 async function onMessageDelivered(event) {
   const { delivery } = event;
-  console.log(`📬 Message delivered — ID: ${delivery.message_id}`);
+  console.log(`📬 Message delivered — ID: ${delivery?.message_id}`);
 }
 
 async function onMessageBounced(event) {
   const { bounce } = event;
-  console.error(`⚠️  Message bounced — ID: ${bounce.message_id}, Type: ${bounce.bounce_type}`);
+  console.error(`⚠️  Message bounced — ID: ${bounce?.message_id}, Type: ${bounce?.bounce_type}`);
 }
 
 async function onMessageComplained(event) {
   const { complaint } = event;
-  console.warn(`🚨 Spam complaint — ID: ${complaint.message_id}`);
+  console.warn(`🚨 Spam complaint — ID: ${complaint?.message_id}`);
 }
 
 async function onMessageRejected(event) {
   const { reject } = event;
-  console.error(`🚫 Message rejected — ID: ${reject.message_id}`);
+  console.error(`🚫 Message rejected — ID: ${reject?.message_id}`);
 }
 
 async function onDomainVerified(event) {
   const { domain } = event;
-  console.log(`🌐 Domain verified: ${domain.domain}`);
+  console.log(`🌐 Domain verified: ${domain?.domain}`);
 }
 
-// HTTP Server for local testing
+// ── HTTP Server ───────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/api/webhook") {
     console.log(`⚡ Incoming Webhook! Method: ${req.method}`);
-    
+
     const rawBody = await getRawBody(req);
-    
-    let event;
+    // x-local-test: true header = fake IDs, skip actual send
     const isLocalTest = req.headers["x-local-test"] === "true";
-    
+
+    let event;
     try {
       if (isLocalTest) {
         event = JSON.parse(rawBody.toString());
@@ -388,14 +422,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Respond 200 immediately so AgentMail doesn't retry
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ received: true }));
 
     try {
-      await processEvent(event);
+      await processEvent(event, isLocalTest);
     } catch (err) {
       console.error("Error processing event:", err);
     }
+
   } else {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not Found" }));
